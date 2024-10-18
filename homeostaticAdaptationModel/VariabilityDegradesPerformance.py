@@ -101,11 +101,11 @@ class MBmodelBuilder():
         # self._KCthresholds_generated = False
         self._params_optimized = False
         self.optimizerParams = {'Ctheta_init':1.,
-                'APLgain_init': 0.0000001,
+                'APLgain_init': 0.000001,
                 'CL_incInhib':0.10, # 10% coding level (prop of active KCs)
                 'CL_disInhib':0.20, # 20% coding level (prop of active KCs)
                 'eta_C':1., # scales adjustment steps for C_theta
-                'eta_alpha':0.0000001, # scales adjustment steps for ALPgain
+                'eta_alpha':0.000001, # scales adjustment steps for ALPgain
                 }
         self.C_theta = self.optimizerParams['Ctheta_init']
         self.alpha = self.optimizerParams['APLgain_init']
@@ -171,6 +171,9 @@ class MBmodelBuilder():
         # calculate coding level CL withou APL gain control
         APLgain = self.alpha
         C_theta = self.C_theta
+        if DEBUG:
+            C_theta = self.optimizerParams['Ctheta_init']
+            APLgain = self.optimizerParams['APLgain_init']
         theta = self.KCtheta.reshape([-1,1])
         # pdb.set_trace()
         if DEBUG:
@@ -200,6 +203,9 @@ class MBmodelBuilder():
             # grad_theta = (CL_noInh-0.20)/(self.nKCs*X.shape[1])*np.sum(dEpsi_dtheta)
             grad_theta = (CL_noInh-self.optimizerParams['CL_disInhib'])*np.mean(dEpsi_dtheta) # rewrite simpler
             C_theta -= self.optimizerParams['eta_C']*grad_theta
+            if DEBUG:
+                pass
+                # print(grad_theta)
             if C_theta<0:
                 raise Exception('the scale factor in the random model is negative')
             
@@ -221,6 +227,9 @@ class MBmodelBuilder():
             # pdb.set_trace()
             grad_alpha = (CL_incInh-self.optimizerParams['CL_incInhib'])/(self.nKCs*X.shape[1])*np.sum(dsig_dalpha)
             APLgain -= self.optimizerParams['eta_alpha']*grad_alpha
+            if DEBUG:
+                pass
+                # print(grad_alpha)
             
             # check if anothing has changed, that mean we struck a dead end
             if detectDeadEnd:
@@ -232,19 +241,21 @@ class MBmodelBuilder():
             # A = [self.PNtoKC.T @ X[:,k] for k in range(X.shape[1])]
             # y_noInh = np.array([A[:,k]-C_theta*theta.flatten() for k in range(X.shape[1])])
             y_noInh = A - C_theta*theta #significantly faster            y_noInh[y_noInh<0.] = 0.
-            CL_noInh = np.mean(CL_noInh)
+            CL_noInh = np.mean(y_noInh>0.)
             #  CL including inhibition
             # A = self.PNtoKC.T @ X
             totalExc = np.sum(A,axis=0)
             y_incInh = y_noInh - APLgain*totalExc #reuse calculation
             # if DEBUG:
                 # pdb.set_trace()
-            y_incInh[y_incInh<0.] = 0
+            # y_incInh[y_incInh<0.] = 0
             CL_incInh = np.mean(y_incInh>0.)
             
             # constraint
             if DEBUG:
-                print(nLoops, CL_noInh, CL_incInh, C_theta, APLgain, grad_theta, grad_alpha)
+                pass
+                # print(nLoops, CL_noInh, CL_incInh, C_theta, APLgain)#, grad_theta, grad_alpha)
+                # print(grad_theta), grad_alpha)
                 # pdb.set_trace()
             goodEnough = (np.abs(CL_noInh/CL_incInh-2.0) <0.2) and (np.abs(CL_incInh-0.1)<0.01)
         
@@ -255,9 +266,9 @@ class MBmodelBuilder():
         self.alpha = APLgain
         return
     
-    def _adjust_C_theta(self, A, C_theta, APLgain, theta):
+    def _adjust_C_theta(self, A, APLgain, C_theta, theta): #APLgain not used, but keep in case derived classes need it
         y_noInh = A - C_theta*theta #significantly faster
-        y_noInh += 0.01*self.rng.normal(size=y_noInh.shape)
+        # y_noInh += 0.01*self.rng.normal(size=y_noInh.shape)
         CL_noInh = np.mean(y_noInh>0.) #collapse two averaging ops
         
         #calculate gradients
@@ -268,12 +279,15 @@ class MBmodelBuilder():
         # grad_theta = (CL_noInh-0.20)/(self.nKCs*X.shape[1])*np.sum(dEpsi_dtheta)
         grad_theta = (CL_noInh-self.optimizerParams['CL_disInhib'])*np.mean(dEpsi_dtheta) # rewrite simpler
         C_theta -= self.optimizerParams['eta_C'] * grad_theta
+        if DEBUG:
+            pass
+            # print(grad_theta)
         return C_theta
 
     def _adjust_alpha(self, A, APLgain, C_theta, theta):
         totalExc = np.sum(A,axis=0) #total excitation (separate for each odor)
         y_incInh = A - APLgain*totalExc - C_theta*theta #significantly faster
-        y_incInh += 0.01*self.rng.normal(size=y_incInh.shape)
+        # y_incInh += 0.01*self.rng.normal(size=y_incInh.shape)
         # y_incInh[y_incInh<0.] = 0.
         CL_incInh = np.mean(y_incInh>0.)
         
@@ -285,6 +299,9 @@ class MBmodelBuilder():
         dsig_dalpha = -1.*(y_incInh>0.)*dAct_dalpha*dsig_dy
         grad_alpha = (CL_incInh - self.optimizerParams['CL_incInhib']) * np.mean(dsig_dalpha)
         APLgain -= self.optimizerParams['eta_alpha'] * grad_alpha
+        if DEBUG:
+            pass
+            # print(grad_alpha)
         return APLgain
 
     def Sigmoid_deriv(self, x):
@@ -300,6 +317,9 @@ class MBmodelBuilder():
         # pdb.set_trace()
         if DEBUG:
             pdb.set_trace()
+        if DEBUG:
+            C_theta = self.optimizerParams['Ctheta_init']
+            APLgain = self.optimizerParams['APLgain_init']
         if detectDeadEnd:
             APLgain_prev = APLgain
             C_prev = C_theta
@@ -315,8 +335,6 @@ class MBmodelBuilder():
             # pdb.set_trace()
             # optimise APLgain, recalculate after updating C_theta
             APLgain = self._adjust_alpha(A, APLgain, C_theta, theta)
-            if APLgain<0:
-                raise Exception('the APL factor in the random model is negative')
             
             # check if anothing has changed, that means we struck a dead end
             if detectDeadEnd:
@@ -335,11 +353,14 @@ class MBmodelBuilder():
             
             # constraint
             if DEBUG:
-                print(nLoops, CL_noInh, CL_incInh, C_theta, APLgain)
+                pass
+                # print(nLoops, CL_noInh, CL_incInh, C_theta, APLgain)
                 # pdb.set_trace()
             goodEnough = (np.abs(CL_noInh/CL_incInh-2.0) <0.2) and (np.abs(CL_incInh-0.1)<0.01)
         
         print(f'Optimisation took {nLoops} loops')
+        if APLgain<0:
+            raise Exception('the APL factor in the random model is negative')
         #now set the parameters in odel
         self._params_optimized = True
         self.C_theta = C_theta
@@ -356,6 +377,9 @@ class MBmodelBuilder():
         # calculate coding level CL withou APL gain control
         APLgain = self.alpha
         C_theta = self.C_theta
+        if DEBUG:
+            C_theta = self.optimizerParams['Ctheta_init']
+            APLgain = self.optimizerParams['APLgain_init']
         theta = self.KCtheta        
         if DEBUG:
             pdb.set_trace()
@@ -660,4 +684,6 @@ if __name__=='__main__':
                     )/( PNtrials.max() - PNtrials.min())
     
     thisMB = MBmodelBuilder(nKCs=2000,nPNs=24).build()
-    thisMB.optimise(PNtrials)
+    # thisMB.optimise(PNtrials)
+    thisMB._mbModelGen.optimize_params_NadasCode(PNtrials)
+    thisMB._mbModelGen.optimize_params_rewrite(PNtrials)
