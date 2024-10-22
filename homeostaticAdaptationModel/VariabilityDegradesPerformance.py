@@ -33,9 +33,13 @@ class MBmodel():
         self.__dict__.update(newParams)
         return
     
+    def get_optimiser_parameters(self):
+        return self._mbModelGen.optimizerParams
+    
     def optimise(self, PNactivity):
-        self._mbModelGen.optimize_params_NadasCode(PNactivity)
+        # self._mbModelGen.optimize_params_NadasCode(PNactivity)
         # self._mbModelGen.optimize_params_rewrite(PNactivity)
+        self._mbModelGen.optimize_params(PNactivity)
         self.updateModel()
     
     def simulate(self, PNactivity: np.ndarray):
@@ -106,6 +110,8 @@ class MBmodelBuilder():
                 'CL_disInhib':0.20, # 20% coding level (prop of active KCs)
                 'eta_C':1., # scales adjustment steps for C_theta
                 'eta_alpha':0.000001, # scales adjustment steps for ALPgain
+                'epsilon-CL_incInh': 0.01,
+                'maxLoops': 1000
                 }
         self.C_theta = self.optimizerParams['Ctheta_init']
         self.alpha = self.optimizerParams['APLgain_init']
@@ -160,7 +166,10 @@ class MBmodelBuilder():
         # ease of comparison with Nada's matlab code
         return np.exp(-0.0507 + 0.3527*self.rng.standard_normal(shape) )
         
-
+    def optimize_params(self, PNactivity):
+        self.optimize_params_rewrite(PNactivity)
+        return
+    
     def optimize_params_NadasCode(self, X: np.ndarray):
         goodEnough = False
         detectDeadEnd = True
@@ -257,7 +266,7 @@ class MBmodelBuilder():
                 # print(nLoops, CL_noInh, CL_incInh, C_theta, APLgain)#, grad_theta, grad_alpha)
                 # print(grad_theta), grad_alpha)
                 # pdb.set_trace()
-            goodEnough = (np.abs(CL_noInh/CL_incInh-2.0) <0.2) and (np.abs(CL_incInh-0.1)<0.01)
+            goodEnough = (np.abs(CL_noInh/CL_incInh-2.0) <0.2) and (np.abs(CL_incInh-self.optimizerParams['CL_incInhib'])<self.optimizerParams['epsilon-CL_incInh'])
         
         print(f'Optimisation took {nLoops} loops')
         #now set the parameters in odel
@@ -268,6 +277,7 @@ class MBmodelBuilder():
     
     def _adjust_C_theta(self, A, APLgain, C_theta, theta): #APLgain not used, but keep in case derived classes need it
         y_noInh = A - C_theta*theta #significantly faster
+        y_noInh[y_noInh<0.] = 0. #seems useless at first, but helps to prevent getting stuck by getting more dsig_dy>>0.
         # y_noInh += 0.01*self.rng.normal(size=y_noInh.shape)
         CL_noInh = np.mean(y_noInh>0.) #collapse two averaging ops
         
@@ -303,7 +313,7 @@ class MBmodelBuilder():
             pass
             # print(grad_alpha)
         return APLgain
-
+    
     def Sigmoid_deriv(self, x):
         return np.exp(-self.Sigmoid_factor*x)/((1+np.exp(-self.Sigmoid_factor*x))**2)
 
@@ -311,6 +321,7 @@ class MBmodelBuilder():
         goodEnough = False
         detectDeadEnd = True
         nLoops = 0
+        maxLoops = self.optimizerParams['maxLoops']
         APLgain = self.alpha
         C_theta = self.C_theta
         theta = self.KCtheta.reshape([-1,1])
@@ -325,14 +336,14 @@ class MBmodelBuilder():
             C_prev = C_theta
         while not goodEnough:
             nLoops +=1
-            if nLoops>10000:
+            if nLoops>maxLoops:
                 raise Exception('Optimisation did not converge')
             A = self.PNtoKC.T @ PNactivity
             
             C_theta = self._adjust_C_theta(A, APLgain, C_theta, theta)
             if C_theta<0:
                 raise Exception('the scale factor in the random model is negative')
-            # pdb.set_trace()
+
             # optimise APLgain, recalculate after updating C_theta
             APLgain = self._adjust_alpha(A, APLgain, C_theta, theta)
             
@@ -356,7 +367,8 @@ class MBmodelBuilder():
                 pass
                 # print(nLoops, CL_noInh, CL_incInh, C_theta, APLgain)
                 # pdb.set_trace()
-            goodEnough = (np.abs(CL_noInh/CL_incInh-2.0) <0.2) and (np.abs(CL_incInh-0.1)<0.01)
+            goodEnough = (np.abs(CL_noInh/CL_incInh-2.0) <0.2) and (np.abs(CL_incInh-self.optimizerParams['CL_incInhib']) 
+                             <self.optimizerParams['epsilon-CL_incInh'] )
         
         print(f'Optimisation took {nLoops} loops')
         if APLgain<0:
@@ -444,13 +456,15 @@ class MBmodelBuilder():
     def get_nKCs(self):
         return self.nKCs
     def get_model_parameters(self):
-        return {'nPNs':self.nPNs,
+        d = {'nPNs':self.nPNs,
                 'nKCs':self.nKCs,
                 'alpha': self.alpha, # APLgain 
                 'KCtheta':self.KCtheta, #spike_thresholds
                 'C_theta':self.C_theta, # constant factor for KCtheta
                 'PNtoKC': self.PNtoKC #PN to KC weights
-                }
+                } 
+        # update this general dict with optimised parameters to simplify adding new parameters
+        return d | self.get_optimised_parameters() # optimised should include model-specific
     
     def build(self,**kwargs):
         self.PNtoKC = self._generate_claw_connectivity(
@@ -463,46 +477,72 @@ class MBmodelBuilder():
                 kwargs.get('theta_limits',(0.01,70))  )
         return MBmodel(self)
         
+    def get_optimised_parameters(self):
+        return {'C_theta': self.C_theta, 'alpha': self.alpha }
+        
 
-class MBmodelBuilder_adjustableThreshold(MBmodelBuilder):
+class MBmodelBuilder_homeostaticAbstractClass(MBmodelBuilder):
+    """This class only adds certain parameters in its constructor.
+    Like the name says, this is an abstract class meant for homeostatic 
+    models to inherit from."""
     def __init__(self,*args,**kwargs):
-        super(MBmodelBuilder_adjustableThreshold, self).__init__(*args,**kwargs)
-        # define extra parameters, taken from Nada's code
+        super(MBmodelBuilder_homeostaticAbstractClass, self).__init__(*args,**kwargs)
         self.optimizerParams['lifetime-sparseness-A0'] = 0.51
-        self.optimizerParams['eta_theta'] = 0.01
         self.optimizerParams['epsilon_A0'] = 0.06*self.optimizerParams['lifetime-sparseness-A0']
+        self.optimizerParams['maxLoops'] = 10000
+        return
+
+
+class MBmodelBuilder_homeostaticThreshold(MBmodelBuilder_homeostaticAbstractClass):
+    """aka the magenta model"""
+    def __init__(self,*args,**kwargs):
+        super(MBmodelBuilder_homeostaticThreshold, self).__init__(*args,**kwargs)
+        # define extra parameters, taken from Nada's code
+        self.optimizerParams['eta_theta'] = 0.1 # originally 0.01
         return
         
-    def _adjust_theta(self, A, theta, C_theta):
-        y_incInh = A - APLgain*sum(A,axis=0) - C_theta*theta
+    def _adjust_theta(self, A, APLgain, C_theta, theta):
+        y_incInh = A - APLgain*np.sum(A,axis=0) - C_theta*theta
         y_incInh[y_incInh<0.] = 0. #yes this time I need it
-        avgAKcs = mean(y_incInh,axis=1); #lifetime average activity (mean actoss trials)
+        avgAKcs = np.mean(y_incInh,axis=1) #lifetime average activity (mean actoss trials)
         # am we sure that we shouldn't take y_incInh>0, because A0 is only 0.51
         # the present way is directly taken from Nada's code
         errorInActivity = avgAKcs - self.optimizerParams['lifetime-sparseness-A0']
-        theta = theta - self.optimizerParams['eta_theta'] * C_theta * errorInActivity #WTF, sign error by Nada ?!
+        errorInActivity = errorInActivity.reshape(theta.shape)
+        theta += self.optimizerParams['eta_theta'] * C_theta * errorInActivity #yes += (-*-)
         theta[theta<0.] = 0.;
         return theta
     
-    def optimize_params_rewrite(self, PNactivity):
+    def optimize_params(self, PNactivity):
         goodEnough = False
         detectDeadEnd = True
         nLoops = 0
+        maxLoops = self.optimizerParams['maxLoops']
         APLgain = self.alpha
         C_theta = self.C_theta
         theta = self.KCtheta.reshape([-1,1])
         # pdb.set_trace()
         if DEBUG:
             pdb.set_trace()
+        if DEBUG:
+            C_theta = self.optimizerParams['Ctheta_init']
+            APLgain = self.optimizerParams['APLgain_init']
         if detectDeadEnd:
             APLgain_prev = APLgain
             C_prev = C_theta
             theta_prev = theta
         while not goodEnough:
             nLoops +=1
-            if nLoops>1000:
-                raise Exception('Optimisation did not converge')
-            A = self.PNtoKC.T @ X
+            if nLoops>maxLoops:
+                with open('Current_best_guess_Parameters.txt.','w') as fl:
+                    fl.write('APLgain\n')
+                    fl.write(APLgain)
+                    fl.write('\nC_thete\n')
+                    fl.write(C_theta)
+                    fl.write('\ntheta\n')
+                    fl.writelines(theta)
+                raise Exception(f'Optimisation did not converge\nCurrent best guess is:/n{APLgain=}\n{C_theta=}\n{theta=} ')
+            A = self.PNtoKC.T @ PNactivity
             
             C_theta = self._adjust_C_theta(A, APLgain, C_theta, theta)
             if C_theta<0:
@@ -510,44 +550,157 @@ class MBmodelBuilder_adjustableThreshold(MBmodelBuilder):
             
             # optimise APLgain, recalculate after updating C_theta
             APLgain = self._adjust_alpha(A, APLgain, C_theta, theta)
-            if APLgain<0:
-                raise Exception('the APL factor in the random model is negative')
 
             theta = self._adjust_theta(A, APLgain, C_theta, theta)
             
-            # check if anothing has changed, that mean we struck a dead end
+            # check if nothing has changed, that mean we struck a dead end
             if detectDeadEnd:
-                if APLgain==APLgain_prev and C_theta==C_prev:
+                if APLgain==APLgain_prev and C_theta==C_prev and np.all(theta==theta_prev):
                     raise Exception('Values remained unchanged without fulfilling the criteria!')
                 APLgain_prev, C_prev, theta_prev = APLgain, C_theta, theta
             #check if constraints are met
             #  CL without inhibition
             y_noInh = A - C_theta*theta
-            CL_noInh = np.mean(CL_noInh)
+            CL_noInh = np.mean(y_noInh>0.)
             #  CL including inhibition
             totalExc = np.sum(A,axis=0)
             y_incInh = y_noInh - APLgain*totalExc #reuse calculation
             CL_incInh = np.mean(y_incInh>0.)
             y_incInh[y_incInh<0.] = 0.
-            avgKcs = np.mean(y_incInh, axis=1)
+            avgAKcs = np.mean(y_incInh, axis=1)
             
             # constraint
             if DEBUG:
-                print(nLoops, CL_noInh, CL_incInh, C_theta, APLgain, grad_theta, grad_alpha)
+                print(nLoops, CL_noInh, CL_incInh, C_theta, APLgain)
                 # pdb.set_trace()
-            goodEnough = ( np.all(np.abs(avgAKcs-A0)<self.optimizerParams['epsilon_A0']) and
+            goodEnough = ( np.all(np.abs(avgAKcs-self.optimizerParams['lifetime-sparseness-A0'])<self.optimizerParams['epsilon_A0']) and
                         (np.abs(CL_noInh/CL_incInh-2.0) <0.2) and
-                        (np.abs(CL_incInh-0.1)<0.01) )
+                        (np.abs(CL_incInh-self.optimizerParams['CL_incInhib'])<self.optimizerParams['epsilon-CL_incInh']) 
+                        )
         
         print(f'Optimisation took {nLoops} loops')
+        if APLgain<0:
+            raise Exception('the APL factor in the random model is negative')
         #now set the parameters in odel
         self._params_optimized = True
         self.C_theta = C_theta
         self.alpha = APLgain
+        self.KCtheta = theta
         return
 
+    def get_optimised_parameters(self):
+        return {'C_theta': self.C_theta, 'alpha': self.alpha, 
+                'KCtheta': self.KCtheta}
 
-# class VariableMBBuilder(MBmodelBuilder):
+class MBmodelBuilder_homeostaticExcitation(MBmodelBuilder_homeostaticAbstractClass):
+    """a.k.a. the blue model"""
+    def __init__(self,*args,**kwargs):
+        super(MBmodelBuilder_homeostaticExcitation, self).__init__(*args,**kwargs)
+        # define extra parameters, taken from Nada's code
+        self.optimizerParams['eta_weights'] = 0.2 #originally 0.05
+        pass
+    
+    def build(self,**kwargs):
+        model = super(MBmodelBuilder_homeostaticExcitation, self).build(**kwargs)
+        self.PNtoKCmask = (self.PNtoKC.T > 0.).astype(float) # offload to avoid repeated calculations
+        return model
+    
+    def _adjust_PNtoKCweights(self, A, APLgain, C_theta, theta, PNtoKC):
+        y_incInh = A - APLgain*np.sum(A,axis=0) - C_theta*theta
+        y_incInh[y_incInh<0.] = 0. #yes this time I need it
+        avgAKcs = np.mean(y_incInh,axis=1) #lifetime average activity (mean actoss trials)
+        errorInActivity = avgAKcs - self.optimizerParams['lifetime-sparseness-A0']
+        # if KC_j was too active, decrease all post-synapses of KC_j by the same amount
+        PNtoKC -= (self.optimizerParams['eta_weights'] * 
+            self.PNtoKCmask *
+            errorInActivity.reshape([-1,1]) ) #assert shape
+        PNtoKC[PNtoKC<0.] = 0. #then prune those that make no more sense
+        return PNtoKC
+        
+    def optimize_params(self,PNactivity):
+        goodEnough = False
+        detectDeadEnd = True
+        nLoops = 0
+        maxLoops = self.optimizerParams['maxLoops']
+        APLgain = self.alpha
+        C_theta = self.C_theta
+        theta = self.KCtheta.reshape([-1,1])
+        PNtoKC = self.PNtoKC.T #include the transposition here (!)
+        # pdb.set_trace()
+        if DEBUG:
+            pdb.set_trace()
+        if DEBUG:
+            C_theta = self.optimizerParams['Ctheta_init']
+            APLgain = self.optimizerParams['APLgain_init']
+        if detectDeadEnd:
+            APLgain_prev = APLgain
+            C_prev = C_theta
+            PNtoKC_prev = PNtoKC
+        while not goodEnough:
+            nLoops += 1
+            if nLoops>maxLoops:
+                with open('Current_best_guess_Parameters.txt.','w') as fl:
+                    fl.write('APLgain\n')
+                    fl.write(APLgain)
+                    fl.write('\nC_thete\n')
+                    fl.write(C_theta)
+                    fl.write('\ntheta\n')
+                    fl.writelines(theta)
+                raise Exception(f'Optimisation did not converge\nCurrent best guess is:/n{APLgain=}\n{C_theta=}\n{theta=} ')
+            A = PNtoKC @ PNactivity
+            
+            C_theta = self._adjust_C_theta(A, APLgain, C_theta, theta)
+            if C_theta<0:
+                raise Exception('the scale factor in the random model is negative')
+            
+            # optimise APLgain, recalculate after updating C_theta
+            APLgain = self._adjust_alpha(A, APLgain, C_theta, theta)
+
+            PNtoKC = self._adjust_PNtoKCweights(A, APLgain, C_theta, theta, PNtoKC)
+            
+            if DEBUG:
+                print(nLoops)
+ 
+            # check if nothing has changed, that mean we struck a dead end
+            if detectDeadEnd:
+                if APLgain==APLgain_prev and C_theta==C_prev and np.all(PNtoKC==PNtoKC_prev):
+                    raise Exception('Values remained unchanged without fulfilling the criteria!')
+                APLgain_prev, C_prev, PNtoKC_prev = APLgain, C_theta, PNtoKC
+            # check if conditions are met
+            goodEnough = self._check_constraints(A, APLgain, C_theta, theta, PNtoKC)
+        
+        print(f'Optimisation took {nLoops} loops')
+        if APLgain<0:
+            raise Exception('the APL factor in the random model is negative')
+        #now set the parameters in odel
+        self._params_optimized = True
+        self.C_theta = C_theta
+        self.alpha = APLgain
+        self.PNtoKC = PNtoKC.T #undo the transpose iff it was done before loop
+        return
+    
+    def _check_constraints(self, A, APLgain, C_theta, theta, PNtoKC) ->bool :
+        # coding level without inhibition
+        y_noInh = A - C_theta*theta
+        CL_noInh = np.mean(y_noInh>0.)
+        # coding level including inhibition
+        y_incInh = y_noInh - APLgain* np.sum(A,axis=0)
+        CL_incInh = np.mean(y_incInh>0.)
+        # lifetime sparseness (average responses of KCj to all odors)
+        y_incInh[y_incInh<0.] = 0.
+        avgAKcs = np.mean(y_incInh, axis=1)
+        if DEBUG:
+            print(CL_noInh, CL_incInh, C_theta, APLgain)
+            # pdb.set_trace()
+        conditionsFulfilled = ( np.all(np.abs(avgAKcs-self.optimizerParams['lifetime-sparseness-A0']) 
+                                      <self.optimizerParams['epsilon_A0']) and
+                     ( np.abs(CL_noInh/CL_incInh-2.0) <0.2) and
+                     ( np.abs(CL_incInh-self.optimizerParams['CL_incInhib']) 
+                                < self.optimizerParams['epsilon-CL_incInh']) )        
+        return conditionsFulfilled
+
+    def get_optimised_parameters(self):
+        return {'C_theta': self.C_theta, 'alpha': self.alpha, 'PNtoKC': self.PNtoKC}
 
 class OdorResponses():
     def __init__(self,*_,**kwargs):
@@ -685,5 +838,5 @@ if __name__=='__main__':
     
     thisMB = MBmodelBuilder(nKCs=2000,nPNs=24).build()
     # thisMB.optimise(PNtrials)
-    thisMB._mbModelGen.optimize_params_NadasCode(PNtrials)
-    thisMB._mbModelGen.optimize_params_rewrite(PNtrials)
+    # thisMB._mbModelGen.optimize_params_NadasCode(PNtrials)
+    # thisMB._mbModelGen.optimize_params_rewrite(PNtrials)
