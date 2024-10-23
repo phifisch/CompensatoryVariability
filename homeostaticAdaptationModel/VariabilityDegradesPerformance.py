@@ -180,6 +180,7 @@ class MBmodelBuilder():
         # calculate coding level CL withou APL gain control
         APLgain = self.alpha
         C_theta = self.C_theta
+        maxLoops = self.optimizerParams['maxLoops']
         if DEBUG:
             C_theta = self.optimizerParams['Ctheta_init']
             APLgain = self.optimizerParams['APLgain_init']
@@ -192,8 +193,9 @@ class MBmodelBuilder():
             C_theta_prev = C_theta
         while not goodEnough:
             nLoops +=1
-            if nLoops>10000:
-                raise Exception('Optimisation did not converge')
+            if nLoops>maxLoops:
+                raise NotConvergingError(f'Optimisation did not converge after {nLoops} loops.', 
+                      {'APLgain':APLgain, 'C_theta':C_theta } )
             # A = [self.PNtoKC.T @ X[:,k] for k in range(X.shape[1])]
             A = self.PNtoKC.T @ X
             # y_noInh = np.array([A[:,k]-C_theta*theta.flatten() for k in range(X.shape[1])])
@@ -216,7 +218,7 @@ class MBmodelBuilder():
                 pass
                 # print(grad_theta)
             if C_theta<0:
-                raise Exception('the scale factor in the random model is negative')
+                raise InvalidOptimisedValueError('the scale factor in the random model is negative')
             
             # optimise APLgain, recalculate after updating C_theta
             # A = [self.PNtoKC.T @ X[:,k] for k in range(X.shape[1])]
@@ -243,8 +245,8 @@ class MBmodelBuilder():
             # check if anothing has changed, that mean we struck a dead end
             if detectDeadEnd:
                 if APLgain==APLgain_prev and C_theta==C_theta_prev:
-                    raise Exception('Values remained unchanged without fulfilling the criteria!')
-
+                    raise NotConvergingError('Values remained unchanged without fulfilling the criteria',
+                                {'APLgain':APLgain, 'C_theta':C_theta} )
             #check if constraints are met
             #  CL without inhibition
             # A = [self.PNtoKC.T @ X[:,k] for k in range(X.shape[1])]
@@ -337,12 +339,13 @@ class MBmodelBuilder():
         while not goodEnough:
             nLoops +=1
             if nLoops>maxLoops:
-                raise Exception('Optimisation did not converge')
+                raise NotConvergingError(f'Optimisation did not converge after {nLoops} loops.', 
+                      {'APLgain':APLgain, 'C_theta':C_theta } )
             A = self.PNtoKC.T @ PNactivity
             
             C_theta = self._adjust_C_theta(A, APLgain, C_theta, theta)
             if C_theta<0:
-                raise Exception('the scale factor in the random model is negative')
+                raise InvalidOptimisedValueError('the scale factor in the random model is negative')
 
             # optimise APLgain, recalculate after updating C_theta
             APLgain = self._adjust_alpha(A, APLgain, C_theta, theta)
@@ -350,7 +353,8 @@ class MBmodelBuilder():
             # check if anothing has changed, that means we struck a dead end
             if detectDeadEnd:
                 if APLgain==APLgain_prev and C_theta==C_prev:
-                    raise Exception('Values remained unchanged without fulfilling the criteria!')
+                    raise NotConvergingError('Values remained unchanged without fulfilling the criteria',
+                                {'APLgain':APLgain, 'C_theta':C_theta } )
                 APLgain_prev = APLgain
                 C_prev = C_theta
             #check if constraints are met
@@ -372,7 +376,7 @@ class MBmodelBuilder():
         
         print(f'Optimisation took {nLoops} loops')
         if APLgain<0:
-            raise Exception('the APL factor in the random model is negative')
+            raise InvalidOptimisedValueError('the APL factor in the random model is negative')
         #now set the parameters in odel
         self._params_optimized = True
         self.C_theta = C_theta
@@ -534,19 +538,13 @@ class MBmodelBuilder_homeostaticThreshold(MBmodelBuilder_homeostaticAbstractClas
         while not goodEnough:
             nLoops +=1
             if nLoops>maxLoops:
-                with open('Current_best_guess_Parameters.txt.','w') as fl:
-                    fl.write('APLgain\n')
-                    fl.write(APLgain)
-                    fl.write('\nC_thete\n')
-                    fl.write(C_theta)
-                    fl.write('\ntheta\n')
-                    fl.writelines(theta)
-                raise Exception(f'Optimisation did not converge\nCurrent best guess is:/n{APLgain=}\n{C_theta=}\n{theta=} ')
+                raise NotConvergingError(f'Optimisation did not converge after {nLoops} loops.', 
+                      {'APLgain':APLgain, 'C_theta':C_theta, 'KCtheta':theta } )
             A = self.PNtoKC.T @ PNactivity
             
             C_theta = self._adjust_C_theta(A, APLgain, C_theta, theta)
             if C_theta<0:
-                raise Exception('the scale factor in the random model is negative')
+                raise InvalidOptimisedValueError('the scale factor in the random model is negative')
             
             # optimise APLgain, recalculate after updating C_theta
             APLgain = self._adjust_alpha(A, APLgain, C_theta, theta)
@@ -556,7 +554,8 @@ class MBmodelBuilder_homeostaticThreshold(MBmodelBuilder_homeostaticAbstractClas
             # check if nothing has changed, that mean we struck a dead end
             if detectDeadEnd:
                 if APLgain==APLgain_prev and C_theta==C_prev and np.all(theta==theta_prev):
-                    raise Exception('Values remained unchanged without fulfilling the criteria!')
+                                {'APLgain':APLgain, 'C_theta':C_theta, 'KCtheta':theta } )
+                    raise NotConvergingError('Values remained unchanged without fulfilling the criteria',
                 APLgain_prev, C_prev, theta_prev = APLgain, C_theta, theta
             #check if constraints are met
             #  CL without inhibition
@@ -580,7 +579,7 @@ class MBmodelBuilder_homeostaticThreshold(MBmodelBuilder_homeostaticAbstractClas
         
         print(f'Optimisation took {nLoops} loops')
         if APLgain<0:
-            raise Exception('the APL factor in the random model is negative')
+            raise InvalidOptimisedValueError('the APL factor in the random model is negative')
         #now set the parameters in odel
         self._params_optimized = True
         self.C_theta = C_theta
@@ -595,7 +594,7 @@ class MBmodelBuilder_homeostaticThreshold(MBmodelBuilder_homeostaticAbstractClas
 class MBmodelBuilder_homeostaticExcitation(MBmodelBuilder_homeostaticAbstractClass):
     """a.k.a. the blue model"""
     def __init__(self,*args,**kwargs):
-        super(MBmodelBuilder_homeostaticExcitation, self).__init__(*args,**kwargs)
+        super().__init__(*args,**kwargs)
         # define extra parameters, taken from Nada's code
         self.optimizerParams['eta_weights'] = 0.2 #originally 0.05
         pass
@@ -637,21 +636,15 @@ class MBmodelBuilder_homeostaticExcitation(MBmodelBuilder_homeostaticAbstractCla
             C_prev = C_theta
             PNtoKC_prev = PNtoKC
         while not goodEnough:
-            nLoops += 1
             if nLoops>maxLoops:
-                with open('Current_best_guess_Parameters.txt.','w') as fl:
-                    fl.write('APLgain\n')
-                    fl.write(APLgain)
-                    fl.write('\nC_thete\n')
-                    fl.write(C_theta)
-                    fl.write('\ntheta\n')
-                    fl.writelines(theta)
-                raise Exception(f'Optimisation did not converge\nCurrent best guess is:/n{APLgain=}\n{C_theta=}\n{theta=} ')
+                raise NotConvergingError(f'Optimisation did not converge after {nLoops} loops.', 
+                      {'APLgain':APLgain, 'C_theta':C_theta, 'PNtoKC':PNtoKC } )
+            nLoops += 1
             A = PNtoKC @ PNactivity
             
             C_theta = self._adjust_C_theta(A, APLgain, C_theta, theta)
             if C_theta<0:
-                raise Exception('the scale factor in the random model is negative')
+                raise InvalidOptimisedValueError('the scale factor in the random model is negative')
             
             # optimise APLgain, recalculate after updating C_theta
             APLgain = self._adjust_alpha(A, APLgain, C_theta, theta)
@@ -664,14 +657,15 @@ class MBmodelBuilder_homeostaticExcitation(MBmodelBuilder_homeostaticAbstractCla
             # check if nothing has changed, that mean we struck a dead end
             if detectDeadEnd:
                 if APLgain==APLgain_prev and C_theta==C_prev and np.all(PNtoKC==PNtoKC_prev):
-                    raise Exception('Values remained unchanged without fulfilling the criteria!')
+                    raise NotConvergingError('Values remained unchanged without fulfilling the criteria',
+                                {'APLgain':APLgain, 'C_theta':C_theta, 'PNtoKC':PNtoKC } )
                 APLgain_prev, C_prev, PNtoKC_prev = APLgain, C_theta, PNtoKC
             # check if conditions are met
             goodEnough = self._check_constraints(A, APLgain, C_theta, theta, PNtoKC)
         
         print(f'Optimisation took {nLoops} loops')
         if APLgain<0:
-            raise Exception('the APL factor in the random model is negative')
+            raise InvalidOptimisedValueError('the APL factor in the random model is negative')
         #now set the parameters in odel
         self._params_optimized = True
         self.C_theta = C_theta
@@ -701,6 +695,29 @@ class MBmodelBuilder_homeostaticExcitation(MBmodelBuilder_homeostaticAbstractCla
 
     def get_optimised_parameters(self):
         return {'C_theta': self.C_theta, 'alpha': self.alpha, 'PNtoKC': self.PNtoKC}
+
+
+
+class NotConvergingError(Exception):
+    def __init__(self, message, currentState: dict = {}, *args,**kwargs):
+        super().__init__(message)
+        if currentState: #is not empty
+            self._write_log(currentState, *args,**kwargs)
+            self.currentState = currentState
+        
+    def _write_log(self, currentState: dict, filename: str = None):
+        if not filename:
+            filename = 'errorReport_stateOfOptimisation_parameter.txt'
+        with open(filename, 'w') as fl:
+            for key, value in currentState.items():
+                fl.write(str(key))
+                fl.write('\n'+ '-'*21 + '\n')
+                fl.write(str(value))
+                fl.write('\n'+ '-'*42 + '\n')
+        return     
+
+class InvalidOptimisedValueError(Exception):
+    pass
 
 class OdorResponses():
     def __init__(self,*_,**kwargs):
