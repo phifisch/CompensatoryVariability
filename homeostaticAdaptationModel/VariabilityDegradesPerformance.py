@@ -3,6 +3,7 @@ from scipy import io as scio
 import os
 import pdb
 from helperFuns import get_PN_Std_Bhandawat
+import datetime
 
 
 DEBUG = True
@@ -25,6 +26,7 @@ class MBmodel():
     def __init__(self, modelGen):
         self._mbModelGen = modelGen
         self.hasMBONs = False
+        self.isOptimised = False
         self.updateModel()
         return
     
@@ -39,8 +41,11 @@ class MBmodel():
     def optimise(self, PNactivity):
         # self._mbModelGen.optimize_params_NadasCode(PNactivity)
         # self._mbModelGen.optimize_params_rewrite(PNactivity)
+        self.isOptimised = False
         self._mbModelGen.optimize_params(PNactivity)
         self.updateModel()
+        self.isOptimised = True
+        return
     
     def simulate(self, PNactivity: np.ndarray):
         a = [self.PNtoKC.T @ PNactivity[k] for k in range(PNactivity.shape[1])]
@@ -58,11 +63,15 @@ class MBmodel():
         self.KCtoMBON = self._modelGen.draw_lognormal_weights((self.nKCs,len(MBONlist)))
         # set a learning rate and possible related parameters
         raise NotImplementedError()
-        return
     
     def learn_MBON_mapping(self, PNinput: np.ndarray[float], isGoodOdor: np.ndarray[bool]):
         raise NotImplementedError("didn't think I was gonna need that any time soon")
-    
+
+    def compute_KC_reponses(self,PNactivity):
+        A = self.PNtoKC.T @ PNactivity
+        y = A - self.alpha * np.sum(A,axis=0) - self.C_theta * self.KCtheta.reshape([-1,1])
+        y[y<0.] = 0.
+        return y
         
 '''class MBmodelGenerator():
     def __init__(self, nKCs: int, nPNs: int,*_,randomSeed: float = None,**kwargs):
@@ -554,8 +563,8 @@ class MBmodelBuilder_homeostaticThreshold(MBmodelBuilder_homeostaticAbstractClas
             # check if nothing has changed, that mean we struck a dead end
             if detectDeadEnd:
                 if APLgain==APLgain_prev and C_theta==C_prev and np.all(theta==theta_prev):
-                                {'APLgain':APLgain, 'C_theta':C_theta, 'KCtheta':theta } )
                     raise NotConvergingError('Values remained unchanged without fulfilling the criteria',
+                        {'APLgain':APLgain, 'C_theta':C_theta, 'KCtheta':theta } )
                 APLgain_prev, C_prev, theta_prev = APLgain, C_theta, theta
             #check if constraints are met
             #  CL without inhibition
@@ -570,7 +579,8 @@ class MBmodelBuilder_homeostaticThreshold(MBmodelBuilder_homeostaticAbstractClas
             
             # constraint
             if DEBUG:
-                print(nLoops, CL_noInh, CL_incInh, C_theta, APLgain)
+                print(nLoops, CL_noInh, CL_incInh, np.mean(avgAKcs),
+                '+-',np.std(avgAKcs), C_theta, APLgain)
                 # pdb.set_trace()
             goodEnough = ( np.all(np.abs(avgAKcs-self.optimizerParams['lifetime-sparseness-A0'])<self.optimizerParams['epsilon_A0']) and
                         (np.abs(CL_noInh/CL_incInh-2.0) <0.2) and
@@ -596,7 +606,7 @@ class MBmodelBuilder_homeostaticExcitation(MBmodelBuilder_homeostaticAbstractCla
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
         # define extra parameters, taken from Nada's code
-        self.optimizerParams['eta_weights'] = 0.2 #originally 0.05
+        self.optimizerParams['eta_weights'] = 0.1#0.2 #originally 0.05
         pass
     
     def build(self,**kwargs):
@@ -661,6 +671,7 @@ class MBmodelBuilder_homeostaticExcitation(MBmodelBuilder_homeostaticAbstractCla
                                 {'APLgain':APLgain, 'C_theta':C_theta, 'PNtoKC':PNtoKC } )
                 APLgain_prev, C_prev, PNtoKC_prev = APLgain, C_theta, PNtoKC
             # check if conditions are met
+            A = PNtoKC @ PNactivity # recalculate because weights changed
             goodEnough = self._check_constraints(A, APLgain, C_theta, theta, PNtoKC)
         
         print(f'Optimisation took {nLoops} loops')
@@ -766,6 +777,8 @@ class OdorResponses():
 if __name__=='__main__':
     odorSetSize = 200
     nPNs = 24
+    saveResults = str(datetime.date.today()) # make new folder each day by default
+    saveResults = os.path.join(os.path.abspath('.'),saveResults)
     # loading Hallem-Carlson data
     halol_respData = scio.loadmat('hallem_olsen.mat')
     halol_respData = halol_respData['hallem_olsen']
@@ -853,7 +866,33 @@ if __name__=='__main__':
     PNtrials = 5*( PNtrials - PNtrials.min() 
                     )/( PNtrials.max() - PNtrials.min())
     
-    thisMB = MBmodelBuilder(nKCs=2000,nPNs=24).build()
-    # thisMB.optimise(PNtrials)
-    # thisMB._mbModelGen.optimize_params_NadasCode(PNtrials)
-    # thisMB._mbModelGen.optimize_params_rewrite(PNtrials)
+    randomMB = MBmodelBuilder(nKCs=2000,nPNs=24).build()
+    randomMB.optimise(PNtrials)
+
+    blueMB = MBmodelBuilder_homeostaticExcitation(nKCs=2000, nPNs=24).build()
+    blueMB.optimise(PNtrials)
+    
+    for thisMB in [randomMB, blueMB]:
+        thisMB.naiveStateResponses = thisMB.compute_KC_reponses(PNtrials) # responses before dTRPA
+        # calculate responses for disinhibited condiditno (APL>Ort+Hist)
+        try: #make sure we reset thisMB if something breaks
+            alpha_naive = thisMB.alpha
+            thisMB.alpha = 0.
+            thisMB.disinhibited_naiveStateResponses = thisMB.compute_KC_reponses(PNtrials)
+        finally: #don't handle exception, just clean up
+            thisMB.alpha = alpha_naive
+        # make a figure of responses with/without inhibition? 
+        # -> violin plot or boxplot of responses to a certain odor (isoamyl acetate)
+        
+        
+        # explore the responses more systematically:
+        # -> how much does KC activity change if we take out APL feedback, depending on alpha?
+        # KCact_diff_byAPLdisInh 
+        
+
+    
+    #### make a bunch of plots
+    saveFigures = True
+    saveFormats = ['.fig','.png','.svg']
+    savepath = './figures/'
+    
