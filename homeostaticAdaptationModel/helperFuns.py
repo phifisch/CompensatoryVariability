@@ -33,3 +33,31 @@ def get_PN_Std_Bhandawat(PNactivity):
             idx = np.argmin(np.abs(BhandawatData[:,0]-PNactivity[i,j]))
             result[i,j] = BhandawatData[idx,1]
     return result
+    
+    
+def propagateORN2PN(ORNactivity=None)
+    """get PN activity from ORNs. Accepts ORN input as argument, as a K-by-M 
+     format with K response patterns in M ORNs (or glomeruli)
+     When no argument is given, it will operate on the Hallem dataset"""
+    if not ORNactivity: # read ORNs from Hallem dataset
+        from pandas import read_csv
+        hd = read_csv('hallem_and_carlson_2006.csv')
+        hd = hd.set_index('odor')
+        odorList = hd.index.to_list()
+        spontFrate = hd.loc['spontaneous firing rate']
+        ORNactivity = hd.drop(index=['spontaneous firing rate']).to_numpy()
+    else:
+        spontFrate = None
+        odorList = []
+    m = 10.63 #gain of lateral inhibition in AL
+    Rmax = 165. #maximum PN response
+    sigma = 12. #non-linearity parameter of ORN to PN response function
+    s = m * np.sum(ORNactivity,axis=1)/190.
+    s = s.reshape(-1,1)
+    
+    PNactivity = Rmax * ORNactivity**1.5 /( 
+                    ORNactivity**1.5 +s**1.5 +sigma**1.5 )
+    
+    return (PNactivity, spontFrate, odorList)
+    
+    
