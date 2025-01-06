@@ -872,17 +872,32 @@ if __name__=='__main__':
     blueMB = MBmodelBuilder_homeostaticExcitation(nKCs=2000, nPNs=24).build()
     blueMB.optimise(PNtrials)
     
-    for thisMB in [randomMB, blueMB]:
-        thisMB.naiveStateResponses = thisMB.compute_KC_reponses(PNtrials) # responses before dTRPA
-        # calculate responses for disinhibited condiditno (APL>Ort+Hist)
-        try: #make sure we reset thisMB if something breaks
-            alpha_naive = thisMB.alpha
-            thisMB.alpha = 0.
-            thisMB.disinhibited_naiveStateResponses = thisMB.compute_KC_reponses(PNtrials)
-        finally: #don't handle exception, just clean up
-            thisMB.alpha = alpha_naive
+    
+    for theseMBmodels in [randomMBmodels, blueMBmodels]:
+        popResponses = KenyonPopulationResponses()
+        popResponses.allOdors = {'naive':[], 'disinhibited':[]}
+        for thisMB in theseMBmodels:
+            thisMB.allOdorResponses_naiveState = thisMB.compute_KC_reponses(PNtrials) # responses before dTRPA
+            # calculate responses for disinhibited condiditno (APL>Ort+Hist)
+            try: #make sure we reset thisMB if something breaks
+                alpha_naive = thisMB.alpha
+                thisMB.alpha = 0.
+                thisMB.allOdorResponses_disinhState = thisMB.compute_KC_reponses(PNtrials)
+            finally: #don't handle exception, just clean up
+                thisMB.alpha = alpha_naive
+            
+            # calculate and plot the cumulated KC pop response to PN input
+            popResponses.allOdors['naive'].append(
+                    np.sum(thisMB.allOdorResponses_naiveState, axis=1) )#is the axis right?
+            
+            
+            popResponses.allOdors['disinhibited'].append(
+                    np.sum(thisMB.allOdorResponses_disinhState, axis=1) )#is the axis right?
+            
+        
         # make a figure of responses with/without inhibition? 
         # -> violin plot or boxplot of responses to a certain odor (isoamyl acetate)
+        
         
         
         # explore the responses more systematically:
@@ -892,7 +907,15 @@ if __name__=='__main__':
 
     
     #### make a bunch of plots
-    saveFigures = True
-    saveFormats = ['.fig','.png','.svg']
-    savepath = './figures/'
+    def saveFigs2Path(fig, saveFileName, saveFigures = True, savepath = './figures/'):    
+        saveFormats = ['.fig','.png','.svg']
+        for sv in saveFormats:
+            fig.save(os.path.join(savepath, saveFileName+sv]))
+        return
     
+    # f,ax = plt.subplots()
+    # ax.pcolormesh(thisMB.allOdorResponses_naiveState
+    
+    
+class KenyonPopulationResponses():
+    pass
